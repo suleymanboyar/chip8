@@ -1,2 +1,5 @@
 BasedOnStyle: LLVM
 IndentWidth: 4
+ReflowComments: true
+PenaltyBreakComment: 110
+PenaltyExcessCharacter: 100
