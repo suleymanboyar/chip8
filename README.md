@@ -12,7 +12,7 @@ so make sure `LD_LIBRARY_PATH` is set
 correctly. [https://www.raylib.com/#supported-platforms](https://www.raylib.com/#supported-platforms)
 
 ## Build and run
-```sh
+```bash
 $ make
 $ ./chip8 ./roms/IBM_Logo.ch8
 ```
@@ -25,5 +25,5 @@ $ ./chip8 ./roms/IBM_Logo.ch8
   * [ ] Run more complex roms
 
 ## Resources
-    - [Guide to making a CHIP-8 emulator, by Tobias V. Langhoff](https://tobiasvl.github.io/blog/write-a-chip-8-emulator/)
-    - [raylib](https://www.raylib.com/)
+- [Guide to making a CHIP-8 emulator, by Tobias V. Langhoff](https://tobiasvl.github.io/blog/write-a-chip-8-emulator/)
+- [raylib](https://www.raylib.com/)
