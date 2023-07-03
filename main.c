@@ -4,40 +4,56 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
-#define MEM_SIZE 4096
+#define RAM_SIZE 4096
 #define MEM_OFFSET 0x200
+#define STACK_SIZE 16
+#define FONT_OFFSET 0x50
 
 #define SCALE 10
-#define SCREEN_WIDTH 64 * SCALE
-#define SCREEN_HEIGHT 32 * SCALE
+#define SCREEN_WIDTH 64
+#define SCREEN_HEIGHT 32
+
+#define DEBUG_CHIP8 0
+
+typedef struct stack stack;
+struct stack {
+    uint16_t data;
+    uint8_t size;
+    stack *next;
+};
 
 struct chip8 {
     uint8_t *ram; /* 4KB RAM */
     uint16_t pc;  /* Program counter, keeps track of where in memory it  */
-    uint16_t *I; /* Locaiton in memory where the executation will be happening */
+    uint16_t I; /* Locaiton in memory where the executation will be happening */
+    stack *sp;  /* stack pointer to nested-list of subroutines */
+    RenderTexture2D display;
     uint8_t deley_timer; /* Decrements 60 per sec */
     uint8_t sound_timer; /* Makes a beep sound if its bigger than 0 */
     uint8_t V[16];       /* general purpose variable from V0 to VF */
+    uint8_t font_size;   /* Amount of bytes on font takes up */
     uint16_t rom_size;
 };
 
-uint8_t font[][5] = {{0xF0, 0x90, 0x90, 0x90, 0xF0},  // 0
-                     {0x20, 0x60, 0x20, 0x20, 0x70},  // 1
-                     {0xF0, 0x10, 0xF0, 0x80, 0xF0},  // 2
-                     {0xF0, 0x10, 0xF0, 0x10, 0xF0},  // 3
-                     {0x90, 0x90, 0xF0, 0x10, 0x10},  // 4
-                     {0xF0, 0x80, 0xF0, 0x10, 0xF0},  // 5
-                     {0xF0, 0x80, 0xF0, 0x90, 0xF0},  // 6
-                     {0xF0, 0x10, 0x20, 0x40, 0x40},  // 7
-                     {0xF0, 0x90, 0xF0, 0x90, 0xF0},  // 8
-                     {0xF0, 0x90, 0xF0, 0x10, 0xF0},  // 9
-                     {0xF0, 0x90, 0xF0, 0x90, 0x90},  // A
-                     {0xE0, 0x90, 0xE0, 0x90, 0xE0},  // B
-                     {0xF0, 0x80, 0x80, 0x80, 0xF0},  // C
-                     {0xE0, 0x90, 0x90, 0x90, 0xE0},  // D
-                     {0xF0, 0x80, 0xF0, 0x80, 0xF0},  // E
-                     {0xF0, 0x80, 0xF0, 0x80, 0x80}}; // F
+uint8_t font[] = {0xF0, 0x90, 0x90, 0x90, 0xF0,  // 0
+                  0x20, 0x60, 0x20, 0x20, 0x70,  // 1
+                  0xF0, 0x10, 0xF0, 0x80, 0xF0,  // 2
+                  0xF0, 0x10, 0xF0, 0x10, 0xF0,  // 3
+                  0x90, 0x90, 0xF0, 0x10, 0x10,  // 4
+                  0xF0, 0x80, 0xF0, 0x10, 0xF0,  // 5
+                  0xF0, 0x80, 0xF0, 0x90, 0xF0,  // 6
+                  0xF0, 0x10, 0x20, 0x40, 0x40,  // 7
+                  0xF0, 0x90, 0xF0, 0x90, 0xF0,  // 8
+                  0xF0, 0x90, 0xF0, 0x10, 0xF0,  // 9
+                  0xF0, 0x90, 0xF0, 0x90, 0x90,  // A
+                  0xE0, 0x90, 0xE0, 0x90, 0xE0,  // B
+                  0xF0, 0x80, 0x80, 0x80, 0xF0,  // C
+                  0xE0, 0x90, 0x90, 0x90, 0xE0,  // D
+                  0xF0, 0x80, 0xF0, 0x80, 0xF0,  // E
+                  0xF0, 0x80, 0xF0, 0x80, 0x80}; // F
 
 typedef struct {
     // DXYN, 0XNN, 1NNN
@@ -62,17 +78,6 @@ void print_bytes(const void *ptr, size_t size) {
         }
     }
     printf("\n");
-}
-
-void pirnt_opcode(opcode op) {
-    printf("Opcode: %x\n"
-           "Head: %x\n"
-           "X: %x\n"
-           "Y: %x\n"
-           "N: %x\n"
-           "NN: %x\n"
-           "NNN: %x\n",
-           op.bytes, op.head, op.X, op.Y, op.N, op.NN, op.NNN);
 }
 
 bool valid_file(char *file) {
@@ -112,9 +117,58 @@ int read_rom_file(char *file, uint8_t *dest, uint16_t *size) {
     fclose(f);
     return EXIT_SUCCESS;
 }
+stack *new_stack_entry(uint16_t value) {
+    stack *sp = malloc(sizeof(stack));
+    if (sp == NULL) {
+        perror("stack malloc");
+        exit(1);
+    }
+    sp->data = value;
+    sp->size = 1;
+    sp->next = NULL;
+    return sp;
+}
+
+int ch8_stack_push(stack **sp, uint16_t value) {
+    if (*sp == NULL) {
+        *sp = new_stack_entry(value);
+        return 0;
+    }
+
+    if ((*sp)->size == STACK_SIZE)
+        return 1;
+
+    (*sp)->size++;
+    stack *cur = *sp;
+    for (int i = 0; i < STACK_SIZE - 1; i++) {
+        if (cur->next == NULL) {
+            cur->next = new_stack_entry(value);
+            break;
+        }
+        cur = cur->next;
+    }
+
+    return 0;
+}
+
+uint16_t ch8_stack_pop(stack **sp) {
+    stack *tmp = *sp;
+    uint16_t ret = (*sp)->data;
+
+    if ((*sp)->next == NULL) {
+        (*sp) = NULL;
+    } else {
+        *sp = (*sp)->next;
+        (*sp)->size = --tmp->size;
+    }
+
+    free(tmp);
+    return ret;
+}
 
 void free_chip8(struct chip8 *ch8) {
     free(ch8->ram);
+    UnloadRenderTexture(ch8->display);
     free(ch8);
 }
 
@@ -125,7 +179,7 @@ struct chip8 *init_chip8(char *rom_file) {
         exit(1);
     }
 
-    ch8->ram = malloc(MEM_SIZE);
+    ch8->ram = calloc(RAM_SIZE, sizeof(ch8->ram));
     if (ch8->ram == NULL) {
         perror("malloc");
         exit(EXIT_FAILURE);
@@ -136,9 +190,21 @@ struct chip8 *init_chip8(char *rom_file) {
         exit(EXIT_FAILURE);
     }
 
+    // insert fonts in ram
+    memcpy(ch8->ram + FONT_OFFSET, &font, sizeof(font) / sizeof(font[0]));
+
+    // Init display
+
+    ch8->display = LoadRenderTexture(SCREEN_WIDTH, SCREEN_HEIGHT);
+    BeginTextureMode(ch8->display);
+    ClearBackground(BLACK);
+    EndTextureMode();
+
     ch8->pc = MEM_OFFSET;
+    ch8->sp = NULL;
     ch8->deley_timer = 0;
     ch8->sound_timer = 0;
+    ch8->font_size = 5;
 
     return ch8;
 }
@@ -157,35 +223,128 @@ opcode get_opcode(uint8_t *mem, uint16_t pc) {
     return op;
 }
 
-uint8_t check_u8_underflow(uint8_t num) { return (uint16_t)num > 255; }
-
-void chip8_clr_bg() { ClearBackground(RAYWHITE); }
-
-void chip8_jump(struct chip8 *ch8, uint16_t NNN) {
-    ch8->pc = NNN;
-    ch8->pc -= 2;
+void draw_screen(struct chip8 *ch8) {
+    BeginDrawing();
+    // Needs to be done this way since openGL has its (0,0) at bottom
+    // left of the monitor.
+    DrawTexturePro(ch8->display.texture,
+                   (Rectangle){0, 0, (float)ch8->display.texture.width,
+                               -(float)ch8->display.texture.height},
+                   (Rectangle){0, 0, (float)ch8->display.texture.width * SCALE,
+                               (float)ch8->display.texture.height * SCALE},
+                   (Vector2){0, 0}, 0.0f, WHITE);
+    EndDrawing();
 }
 
-/* Set the register dest to the value src */
-void chip8_set_reg(uint8_t *dest, uint8_t src) { *dest = src; }
+void chip8_clr_bg(struct chip8 *ch8) {
+    BeginTextureMode(ch8->display);
+    ClearBackground(BLACK);
+    EndTextureMode();
+}
 
-/* Add the value NN to VX */
-void chip8_add_reg(uint8_t *dest, uint8_t src) { *dest += src; }
+// Adds two u8 number and sets *dest to be equal that, and returns 1 if there
+// was an overflow.
+uint8_t ch8_u8_add_reg(uint8_t *dest, uint8_t n1, uint8_t n2) {
+    *dest = n1 + n2;
+    return (*dest < n1 || *dest < n2);
+}
 
-void chip8_or_reg(uint8_t *dest, uint8_t src) { *dest |= src; }
+// Adds two u16 number and sets *dest to be equal that, and returns 1 if there
+// was an overflow.
+uint8_t ch8_u16_add_reg(uint16_t *dest, uint16_t n1, uint16_t n2) {
+    *dest = n1 + n2;
+    return (*dest < n1 || *dest < n2);
+}
 
-void chip8_and_reg(uint8_t *dest, uint8_t src) { *dest &= src; }
+// Subtacts two u8 number and sets *dest to be equal that, and returns 1 if there
+// was an overflow, i.e becomes less than 0.
+uint8_t ch8_u8_sub_reg(uint8_t *dest, uint8_t n1, uint8_t n2) {
+    *dest = n1 - n2;
+    return (n1 < n2);
+}
 
-void chip8_xor_reg(uint8_t *dest, uint8_t src) { *dest ^= src; }
+// Shifts the *dest to 1 bit to the right and returns lsb.
+uint8_t ch8_shr_reg(uint8_t *dest) {
+    uint8_t lsb = *dest & 1;
+    *dest >>= 1;
+    return lsb;
+}
 
-void chip8_sub_reg(uint8_t *dest, uint8_t src) { *dest = src; }
+// Shifts the *dest to 1 bit to the left and returns msb.
+uint8_t ch8_shl_reg(uint8_t *dest) {
+    uint8_t msb = *dest >> 7 & 1;
+    *dest <<= 1;
+    return msb;
+}
 
-void chip8_shr_reg(uint8_t *dest, uint8_t src) { *dest >>= src; }
+// DXYN: Draws a sprite (8,op.N) pixels big by flipping the pixels on
+// the screen if the bit in the sprite is HIGH and set VF=1.
+void chip8_draw_sprite(struct chip8 *ch8, opcode op) {
+    Image img = LoadImageFromTexture(ch8->display.texture);
+    Color *display = LoadImageColors(img);
 
-void chip8_shl_reg(uint8_t *dest, uint8_t src) { *dest <<= src; }
+    Vector2 pos = {.x = ch8->V[op.X] % SCREEN_WIDTH,
+                   .y = ch8->V[op.Y] % SCREEN_HEIGHT};
 
-void chip8_draw_sprite(struct chip8 *ch8) {
-    assert(false && "TODO: needs to be implemented");
+    ch8->V[0xF] = 0;
+    for (int y = 0; y < op.N; y++) {
+        if (pos.y == SCREEN_HEIGHT)
+            break;
+
+        uint8_t sprite_byte = ch8->ram[ch8->I + y];
+
+        for (uint8_t x = 0; x <8; x++) {
+            if (pos.x+x == SCREEN_WIDTH)
+                break;
+
+            uint8_t sprite_pixel = sprite_byte & (0x80 >> x);
+
+            if (sprite_pixel) {
+                uint8_t index = (pos.x + x) + (pos.y+y) * SCREEN_WIDTH;
+                uint32_t hex_color = ColorToInt(GetPixelColor(
+                    &display[index], PIXELFORMAT_UNCOMPRESSED_R8G8B8A8));
+
+                Color color = WHITE;
+                if (hex_color == 0xFFFFFFFF){
+                    ch8->V[0xF] = 1;
+                    color = BLACK;
+                } 
+
+                BeginTextureMode(ch8->display);
+                DrawRectangle(pos.x+x, pos.y+y, 1, 1, color);
+                EndTextureMode();
+            }
+        }
+    }
+    UnloadImageColors(display);
+    UnloadImage(img);
+}
+
+
+// Checks if the given hex value key is being pressed.
+bool chip8_is_key_pressed(uint8_t key) {
+    uint16_t keys[16] = {KEY_ZERO,  KEY_ONE,  KEY_TWO, KEY_THREE,
+                         KEY_FOUR,  KEY_FIVE, KEY_SIX, KEY_SEVEN,
+                         KEY_EIGHT, KEY_NINE, KEY_A,   KEY_B,
+                         KEY_C,     KEY_D,    KEY_E,   KEY_F};
+
+    return IsKeyDown(keys[key]);
+}
+
+// Checks if the given any keys is being pressed, if so return its
+// posision.
+uint8_t chip8_which_key_pressed(void) {
+    uint8_t keys[16] = {KEY_ZERO,  KEY_ONE,  KEY_TWO, KEY_THREE,
+                        KEY_FOUR,  KEY_FIVE, KEY_SIX, KEY_SEVEN,
+                        KEY_EIGHT, KEY_NINE, KEY_A,   KEY_B,
+                        KEY_C,     KEY_D,    KEY_E,   KEY_F};
+
+    for (int i = 0; i < 16; i++) {
+        if (IsKeyDown(keys[i]))
+            return i;
+    }
+
+    return KEY_NULL;
 }
 
 int main(int argc, char *argv[]) {
@@ -200,77 +359,207 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    struct chip8 *ch8 = init_chip8(rom_file);
-
-    printf("loading file: %s\n", rom_file);
-    print_bytes(ch8->ram + MEM_OFFSET, ch8->rom_size);
+    // XXX: Maybe set a random seed;
+    srand(0);
 
     // Start raylib
-    SetTraceLogLevel(LOG_WARNING);
-    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "CHIP 8 Emulation");
+    // SetTraceLogLevel(LOG_WARNING);
+    InitWindow(SCREEN_WIDTH * SCALE, SCREEN_HEIGHT * SCALE, "CHIP 8 Emulation");
+    SetTargetFPS(60);
 
-    printf("\n After raylib:\n");
+    struct chip8 *ch8 = init_chip8(rom_file);
+    printf("loading file: %s\n", rom_file);
     print_bytes(ch8->ram + MEM_OFFSET, ch8->rom_size);
 
     while (!WindowShouldClose()) {
         opcode op = get_opcode(ch8->ram, ch8->pc);
-        pirnt_opcode(op);
+
+        ch8->pc += 2;
 
         switch (op.head) {
-        case 0x0: /* Clear screen */
-            chip8_clr_bg();
+        case 0x0:
+            switch (op.NN) {
+            // Clear the display
+            case 0xE0:
+                chip8_clr_bg(ch8);
+                break;
+            // Set PC to the first subroutine in the stack
+            case 0xEE:
+                ch8->pc = ch8_stack_pop(&ch8->sp);
+                break;
+            }
             break;
-        case 0x1:                    /* Jump */
-            chip8_jump(ch8, op.NNN); /* Works */
+        // Make PC jum to address NNN
+        case 0x1:
+            ch8->pc = op.NNN;
             break;
-        case 0x6: /* Set register VX */
-            chip8_set_reg(&op.X, op.NN);
+        // Push the current PC address to stack and set it to NNN
+        case 0x2:
+            ch8_stack_push(&ch8->sp, ch8->pc);
+            ch8->pc = op.NNN;
             break;
-        case 0x7: /* Add value to register VX */
-            chip8_add_reg(&op.X, op.NN);
+         // Jump to next opcode if VX == NN
+        case 0x3:
+            if (ch8->V[op.X] == op.NN)
+                ch8->pc += 2;
+            break;
+         // Jump to next opcode if VX != NN
+        case 0x4:
+            if (ch8->V[op.X] != op.NN)
+                ch8->pc += 2;
+            break;
+         // Jump to next opcode if VX == VY
+        case 0x5:
+            if (ch8->V[op.X] == ch8->V[op.Y])
+                ch8->pc += 2;
+            break;
+         // Set VX = NN
+        case 0x6: // Set register VX
+            ch8->V[op.X] = op.NN;
+            break;
+         // Add VX += NN
+        case 0x7: // Add value to register VX
+            ch8->V[op.X] += op.NN;
             break;
         case 0x8:
             switch (op.N) {
+            // Set VX = VF
             case 0x0:
-                chip8_set_reg(&ch8->V[op.X], ch8->V[op.Y]);
+                ch8->V[op.X] = ch8->V[op.Y];
                 break;
+            // Set VX = VX OR VY
             case 0x1:
-                chip8_or_reg(&ch8->V[op.X], ch8->V[op.Y]);
+                ch8->V[op.X] |= ch8->V[op.Y];
                 break;
+            // Set VX = VX AND VY
             case 0x2:
-                chip8_and_reg(&ch8->V[op.X], ch8->V[op.Y]);
+                ch8->V[op.X] &= ch8->V[op.Y];
                 break;
+            // Set VX = VX XOR VY
             case 0x3:
-                chip8_xor_reg(&ch8->V[op.X], ch8->V[op.Y]);
+                ch8->V[op.X] ^= ch8->V[op.Y];
                 break;
+            // Set VX += VY, and VF = 1 if overflow else 0
             case 0x4:
-                chip8_add_reg(&ch8->V[op.X], ch8->V[op.X] + ch8->V[op.Y]);
-                ch8->V[0xF] = check_u8_underflow(ch8->V[op.X] + ch8->V[op.Y]);
+                ch8->V[0xF] =
+                    ch8_u8_add_reg(&ch8->V[op.X], ch8->V[op.X], ch8->V[op.Y]);
                 break;
+            // Set VX -= VY, and VF = 1 if overflow else 0
             case 0x5:
-                chip8_sub_reg(&ch8->V[op.X], ch8->V[op.X] - ch8->V[op.Y]);
-                ch8->V[0xF] = check_u8_underflow(ch8->V[op.X] - ch8->V[op.Y]);
+                ch8->V[0xF] =
+                    !ch8_u8_sub_reg(&ch8->V[op.X], ch8->V[op.X], ch8->V[op.Y]);
                 break;
-            case 0x7:
-                chip8_sub_reg(&ch8->V[op.X], ch8->V[op.Y] - ch8->V[op.X]);
-                ch8->V[0xF] = check_u8_underflow(ch8->V[op.Y] - ch8->V[op.X]);
-                break;
+            // Set VX >> 1, VF=LSB
             case 0x6:
-                ch8->V[0xF] = ch8->V[op.X] & 0xF;
-                chip8_shr_reg(&ch8->V[op.X], ch8->V[op.X]);
+                ch8->V[0xF] = ch8_shr_reg(&ch8->V[op.X]);
                 break;
+             // Set VX << 1, VF=MSB
+            case 0x7:
+                ch8->V[0xF] =
+                    !ch8_u8_sub_reg(&ch8->V[op.X], ch8->V[op.Y], ch8->V[op.X]);
+                break;
+            // Set VX = VY - VX
             case 0xe:
-                ch8->V[0xF] = ch8->V[op.X] & 0xF0;
-                chip8_shl_reg(&ch8->V[op.X], ch8->V[op.X]);
+                ch8->V[0xF] = ch8_shl_reg(&ch8->V[op.X]);
                 break;
             }
-        case 0xA: /* Set index regiser I */
             break;
-        case 0xD: /* Draw a sprite */
-            chip8_draw_sprite(ch8);
+        // 9XY0 - Skip if VX != VY
+        case 0x9:
+            if (ch8->V[op.X] != ch8->V[op.Y])
+                ch8->pc += 2;
+            break;
+         // ANNN - I = NNN
+        case 0xA:
+            ch8->I = op.NNN;
+            break;
+        // BNNN - Jump to V0 + NNN
+        // COSMAC uses just NNN but later versions of chip8 started to
+        // use NNN + VX
+        case 0xB:
+#ifdef COSMAC
+            ch8->pc = op.NNN;
+#else
+            ch8->pc = op.NNN + ch8->V[op.X];
+#endif
+            break;
+        // CXNN - VX = rand() & NN
+        case 0xC:
+            ch8->V[op.X] = ((uint8_t)rand()) % 256 & op.NN;
+            break;
+         // DXYN - Draw Sprite
+        case 0xD:
+            chip8_draw_sprite(ch8, op);
+            break;
+        case 0xE:
+            switch (op.NN) {
+            // EX9E - Skip if Key Pressed
+            case 0x9E:
+                if (chip8_is_key_pressed(ch8->V[op.X]))
+                    ch8->pc += 2;
+                break;
+            // EXA1 - Skip if Key Not Pressed
+            case 0xA1:
+                if (!chip8_is_key_pressed(ch8->V[op.X]))
+                    ch8->pc += 2;
+                break;
+            }
+            break;
+        case 0xF:
+            switch (op.NN) {
+            // FX07 - VX = DT, sets VX to  deley timer
+            case 0x7:
+                ch8->V[op.X] = ch8->deley_timer;
+                break;
+            // FX0A - Wait for Key Press
+            case 0xA: {
+                uint8_t key = chip8_which_key_pressed();
+                if (key != KEY_NULL)
+                    ch8->V[op.X] = key;
+                else
+                    ch8->pc -= 2;
+            } break;
+            // FX15 - DT = VX, sets delay timer to DT
+            case 0x15:
+                ch8->deley_timer = ch8->V[op.X];
+                break;
+            // FX18 - ST = VX, sets sound timer to VX
+            case 0x18:
+                ch8->sound_timer = ch8->V[op.X];
+                break;
+            // FX1E - I += VX
+            case 0x1E:
+                ch8->V[0xF] =
+                    ch8_u16_add_reg(&ch8->I, ch8->I, (uint16_t)ch8->V[op.X]);
+                break;
+            // FX29 - Set I to Font Address
+            case 0x29:
+                ch8->I = FONT_OFFSET + ch8->font_size * (ch8->V[op.X] & 0xF);
+                break;
+            // FX33 - I = BCD of VX
+            case 0x33:
+                ch8->ram[ch8->I] = ch8->V[op.X] / 100;
+                ch8->ram[ch8->I + 1] = ch8->V[op.X] % 100 / 10;
+                ch8->ram[ch8->I + 2] = ch8->V[op.X] % 10;
+                break;
+            // FX55 - Store V0 - VX into I
+            case 0x55:
+                for (int i = 0; i <= op.X; i++)
+                    ch8->ram[ch8->I + i] = ch8->V[i];
+                break;
+            // FX65 - Load I into V0 - VX
+            case 0x65:
+                for (int i = 0; i <= op.X; i++)
+                    ch8->V[i] = ch8->ram[ch8->I + i];
+                break;
+            }
             break;
         }
-        ch8->pc += 2;
+
+        // Draw texture
+        draw_screen(ch8);
+
+        // TODO: make a beep sound if ch8->sourd_timer is greater than 0
     }
 
     free_chip8(ch8);
