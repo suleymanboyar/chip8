@@ -1,7 +1,8 @@
 CFLAGS = -std=c17 -g -Wall -Wextra -pedantic
 CC = cc
-CLIBS = -lm
-CLIBS += `pkg-config --libs raylib`
+CLIBS += -I./lib/raylib/include
+CLIBS += -L./lib/raylib/lib
+CLIBS += -l:libraylib.a -lm -ldl -lpthread
 
 chip8: main.c
-	$(CC) $(CFLAGS) $(CLIBS) $^ -o $@
+	$(CC) $(CFLAGS) $^ -o $@ $(CLIBS)

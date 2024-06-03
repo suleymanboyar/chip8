@@ -5,10 +5,6 @@ This a CHIP8 emulator written in C. It uses
 
 ![ibm logo](./img/ibm-logo.png)
 
-## Prerequisit
-### raylib
-You need to have [raylib](https://github.com/raysan5/raylib) installed on your system.
-
 ## Build and run
 ```bash
 $ make
